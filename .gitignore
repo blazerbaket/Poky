@@ -1,0 +1,7 @@
+node_modules/
+npm-debug.log*
+.DS_Store
+
+# Local working files (the game uses the resized public/pragy.png)
+/phrase.txt
+/pragy.png

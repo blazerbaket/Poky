@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a1310">
+  <meta name="description" content="Texas Hold'em with your friends. No sign-up, just pick a nickname.">
+  <title>Poky · Hold'em with friends</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%23177a42'/%3E%3Ctext x='50' y='70' font-size='60' text-anchor='middle' fill='white'%3E%E2%99%A0%3C/text%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;0,700;0,800;1,600&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <!-- Home: nickname + create / join -->
+  <section id="home" class="screen home">
+    <div class="home-card">
+      <div class="logo" aria-label="Poky">
+        <span class="logo-suit">♠</span><span class="logo-suit red">♥</span>
+        <span class="logo-word">Poky</span>
+        <span class="logo-suit">♣</span><span class="logo-suit red">♦</span>
+      </div>
+      <p class="tagline">Texas Hold'em with your friends.<br>No sign-up. Just pick a nickname.</p>
+
+      <p class="invite-note" id="inviteNote" hidden>You've been invited to table <b id="inviteCode"></b></p>
+
+      <label class="field">
+        <span>Your nickname</span>
+        <input id="nameInput" maxlength="16" autocomplete="nickname" placeholder="e.g. Aryan" enterkeyhint="go">
+      </label>
+
+      <button id="createBtn" class="btn primary big" type="button">Create a new table</button>
+
+      <div class="divider"><span>or join a friend's table</span></div>
+
+      <form id="joinForm" class="join-row" autocomplete="off">
+        <input id="codeInput" maxlength="6" placeholder="CODE" autocapitalize="characters" spellcheck="false" aria-label="Table code">
+        <button class="btn" type="submit" id="joinBtn">Join</button>
+      </form>
+      <p class="fine">Play chips only. No real money.</p>
+    </div>
+  </section>
+
+  <!-- Game -->
+  <section id="game" class="screen game hidden">
+    <header class="topbar">
+      <button class="room-chip" data-act="invite" title="Copy invite link">
+        <span class="muted">Table</span> <b id="roomCode"></b> <span class="chip-ico" aria-hidden="true">⧉</span>
+      </button>
+      <div id="statusText" class="status-text"></div>
+      <button class="icon-btn chat-btn" id="chatBtn" data-act="chat" aria-label="Chat">💬<span id="chatBadge" class="badge hidden"></span></button>
+      <div class="menu-wrap">
+        <button class="icon-btn" id="menuBtn" aria-label="Menu" aria-haspopup="true" aria-expanded="false">☰</button>
+        <div id="menu" class="menu hidden" role="menu"></div>
+      </div>
+    </header>
+
+    <div id="connBanner" class="conn-banner hidden">Connection lost. Reconnecting…</div>
+
+    <main class="table-area">
+      <div class="table" id="table">
+        <div class="rail"><div class="felt"></div></div>
+        <div id="seats"></div>
+        <div class="center" id="center">
+          <div id="centerBody" class="center-body"></div>
+          <!-- Pragy, the mascot dealer, sits beside the board -->
+          <div id="pragy" class="pragy hidden" aria-live="polite">
+            <div class="pragy-face"><img src="/pragy.png" alt="Master Dealer Pragy" width="240" height="260"></div>
+            <div class="pragy-tag"><small>Master Dealer</small>Pragy</div>
+            <div id="pragySay" class="pragy-say hidden"></div>
+          </div>
+        </div>
+        <div id="bubbles" class="layer"></div>
+        <div id="fx" class="layer"></div>
+        <div id="callout" class="callout hidden" role="status" aria-live="polite"></div>
+      </div>
+    </main>
+
+    <footer class="controls" id="controls"></footer>
+  </section>
+
+  <!-- Chat & hand log: side panel on desktop, bottom sheet on phones -->
+  <aside id="sidePanel" class="side-panel hidden" aria-label="Chat and hand log">
+    <div class="side-head">
+      <div class="tabs" role="tablist">
+        <button role="tab" id="tabChat" data-act="tab" data-tab="chat">Chat</button>
+        <button role="tab" id="tabLog" data-act="tab" data-tab="log">Hand log</button>
+      </div>
+      <button class="icon-btn" data-act="closePanel" aria-label="Close">✕</button>
+    </div>
+    <div id="chatPane" class="pane chat-pane">
+      <div id="chatList" class="chat-list"></div>
+      <div id="phrases" class="phrases"></div>
+      <form id="chatForm" class="chat-form" autocomplete="off">
+        <input id="chatInput" maxlength="200" placeholder="Say something…" enterkeyhint="send" aria-label="Message">
+        <button class="btn primary" type="submit">Send</button>
+      </form>
+    </div>
+    <div id="logPane" class="pane hidden">
+      <div id="logList" class="log-list"></div>
+    </div>
+  </aside>
+
+  <!-- End-of-night recap -->
+  <dialog id="recapDlg" class="recap-dlg"><div id="recapBody"></div></dialog>
+
+  <!-- Settings -->
+  <dialog id="settingsDlg">
+    <form id="settingsForm" method="dialog">
+      <h2 id="settingsTitle">Table settings</h2>
+      <p id="settingsNote" class="note"></p>
+      <label class="field"><span>Table name</span><input name="tableName" maxlength="32" placeholder="e.g. Friday Night at Aryan's"></label>
+      <fieldset class="theme-pick">
+        <legend>Table style</legend>
+        <label><input type="radio" name="theme" value="classic"><span class="swatch" data-t="classic"></span><span>Classic Green</span></label>
+        <label><input type="radio" name="theme" value="burgundy"><span class="swatch" data-t="burgundy"></span><span>Burgundy Lounge</span></label>
+        <label><input type="radio" name="theme" value="midnight"><span class="swatch" data-t="midnight"></span><span>Midnight Blue</span></label>
+        <label><input type="radio" name="theme" value="kitchen"><span class="swatch" data-t="kitchen"></span><span>Kitchen Table</span></label>
+      </fieldset>
+      <div class="grid2">
+        <label class="field"><span>Starting chips</span><input name="startingStack" type="number" min="2" step="1" inputmode="numeric" required></label>
+        <label class="field"><span>Turn timer (sec, 0 = off)</span><input name="turnTime" type="number" min="0" max="300" step="1" inputmode="numeric" required></label>
+        <label class="field"><span>Small blind</span><input name="smallBlind" type="number" min="1" step="1" inputmode="numeric" required></label>
+        <label class="field"><span>Big blind</span><input name="bigBlind" type="number" min="1" step="1" inputmode="numeric" required></label>
+      </div>
+      <label class="check"><input type="checkbox" name="allowRebuys"> Allow rebuys when a player runs out of chips</label>
+      <div id="playerAdmin" class="player-admin"></div>
+      <div class="dlg-actions">
+        <button class="btn" value="cancel" formnovalidate>Close</button>
+        <button class="btn primary" value="save" id="saveSettings">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/phrases.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

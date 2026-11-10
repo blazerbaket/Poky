@@ -1,0 +1,9 @@
+Sound effects: "Casino Audio" (1.1) by Kenney Vleugels (www.kenney.nl)
+
+License: Creative Commons Zero (CC0) - public domain
+http://creativecommons.org/publicdomain/zero/1.0/
+
+"You may use these assets in personal and commercial projects.
+Credit (Kenney or www.kenney.nl) would be nice but is not mandatory."
+
+The .mp3 files are straight conversions of the original .ogg files (for older Safari).
