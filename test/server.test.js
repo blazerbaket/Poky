@@ -12,7 +12,8 @@ let server;
 
 test.before(async () => {
   server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-    env: { ...process.env, PORT: String(PORT) },
+    // Empty DATABASE_URL: the in-memory store, never the real database from .env.
+    env: { ...process.env, PORT: String(PORT), DATABASE_URL: '' },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
   await new Promise((resolve, reject) => {
@@ -57,6 +58,12 @@ test('create, join, play a full hand, reconnect and kick', async () => {
 
   assert.ok((await emit(b, 'join', { code: code.toLowerCase(), name: 'Ben', token: b.token })).ok);
   assert.ok((await emit(c, 'join', { code, name: 'Ann', token: c.token })).ok); // duplicate name
+  // Newcomers wait for the host to let them in.
+  const asking = await waitFor(a, (s) => s.room.spectators.filter((x) => x.requested).length === 2);
+  assert.equal(asking.seats.filter(Boolean).length, 1);
+  assert.equal(b.state.viewer.spectator, true);
+  assert.equal((await emit(b, 'host', { cmd: 'approve', playerId: c.state.viewer.id })).error, 'Only the host can do that.');
+  for (const x of asking.room.spectators) assert.ok((await emit(a, 'host', { cmd: 'approve', playerId: x.id })).ok);
   const lobby = await waitFor(a, (s) => s.seats.filter(Boolean).length === 3);
   assert.deepEqual(lobby.seats.filter(Boolean).map((p) => p.name), ['Ann', 'Ben', 'Ann 2']);
 
@@ -149,4 +156,158 @@ test('create, join, play a full hand, reconnect and kick', async () => {
   await waitFor(a, (s) => !s.seats.some((p) => p && p.id === catId));
 
   for (const x of [a, b2, c]) x.socket.disconnect();
+});
+
+test('spectators: watch, ask, deny, approve, stand up and sit back down', async () => {
+  const host = client('Hal');
+  const created = await emit(host, 'create', { name: 'Hal', token: host.token });
+  const code = created.code;
+  const pal = client('Pia');
+  assert.ok((await emit(pal, 'join', { code, name: 'Pia', token: pal.token })).ok);
+  await waitFor(host, (s) => s.room.spectators.some((x) => x.requested));
+  assert.ok((await emit(host, 'host', { cmd: 'approve', playerId: pal.state.viewer.id })).ok);
+  await waitFor(pal, (s) => !!s.me);
+
+  // Just watching: no seat, no request, and no playing.
+  const w = client('Wes');
+  assert.ok((await emit(w, 'join', { code, name: 'Wes', token: w.token, watch: true })).ok);
+  let st = await waitFor(host, (s) => s.room.spectators.some((x) => x.name === 'Wes'));
+  assert.equal(st.room.spectators.find((x) => x.name === 'Wes').requested, false);
+  assert.equal((await emit(w, 'action', { type: 'fold' })).error, 'You’re watching. Ask for a seat to play.');
+
+  // Spectators can chat (and are marked as such).
+  const heard = new Promise((r) => host.socket.once('chat', r));
+  assert.ok((await emit(w, 'chat', { text: 'gl all' })).ok);
+  assert.equal((await heard).spectator, true);
+
+  // During a hand a spectator sees no hole cards at all.
+  assert.ok((await emit(host, 'host', { cmd: 'start' })).ok);
+  st = await waitFor(w, (s) => s.handInProgress);
+  assert.equal(st.me, null);
+  for (const p of st.seats.filter(Boolean)) assert.equal(p.cards, null);
+
+  // Ask -> host says no -> can't ask again straight away.
+  const denied = new Promise((r) => w.socket.once('denied', r));
+  assert.ok((await emit(w, 'requestSeat', {})).ok);
+  await waitFor(host, (s) => s.room.spectators.some((x) => x.requested));
+  assert.ok((await emit(host, 'host', { cmd: 'deny', playerId: w.state.viewer.id })).ok);
+  await denied;
+  assert.match((await emit(w, 'requestSeat', {})).error, /not yet/);
+
+  // Turning approval off seats people straight away.
+  assert.ok((await emit(host, 'host', { cmd: 'settings', settings: { ...host.state.settings, requireApproval: false } })).ok);
+  assert.ok((await emit(w, 'requestSeat', {})).ok);
+  st = await waitFor(w, (s) => !!s.me);
+  assert.equal(st.viewer.spectator, false);
+
+  // Standing up keeps your chips; an approved player sits back down without asking.
+  assert.ok((await emit(host, 'host', { cmd: 'settings', settings: { ...host.state.settings, requireApproval: true } })).ok);
+  await waitFor(pal, (s) => s.settings.requireApproval === true);
+  const palId = pal.state.me.id;
+  assert.ok((await emit(pal, 'standUp', {})).ok);
+  st = await waitFor(pal, (s) => s.viewer.spectator);
+  assert.equal(st.viewer.approved, true);
+  assert.ok((await emit(pal, 'requestSeat', {})).ok);
+  st = await waitFor(pal, (s) => !!s.me);
+  const stack = st.seats[st.me.seat].stack;
+  assert.equal(st.me.id, palId);
+  assert.ok(stack > 0 && stack <= 1000, `kept stack ${stack}`);
+
+  // The host can remove a spectator.
+  const w2 = client('Viv');
+  assert.ok((await emit(w2, 'join', { code, name: 'Viv', token: w2.token, watch: true })).ok);
+  const vivId = (await waitFor(w2, (s) => !!s.viewer)).viewer.id;
+  const kicked = new Promise((r) => w2.socket.once('kicked', r));
+  assert.ok((await emit(host, 'host', { cmd: 'kick', playerId: vivId })).ok);
+  await kicked;
+  await waitFor(host, (s) => !s.room.spectators.some((x) => x.id === vivId));
+
+  for (const x of [host, pal, w, w2]) x.socket.disconnect();
+});
+
+test('accounts: sign up, log in, play while logged in and see your stats', async () => {
+  const post = (path, body, cookie) =>
+    fetch(`${URL}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body) });
+  const name = `tester${Math.floor(Math.random() * 1e6)}`;
+
+  // Validation and sign-up.
+  assert.equal((await post('/api/signup', { username: 'x', password: 'secret123' })).status, 400);
+  assert.equal((await post('/api/signup', { username: name, password: '123' })).status, 400);
+  const res = await post('/api/signup', { username: name, password: 'secret123' });
+  assert.equal(res.status, 200);
+  const cookie = res.headers.get('set-cookie').split(';')[0];
+  assert.match(res.headers.get('set-cookie'), /HttpOnly/i);
+  assert.equal((await post('/api/signup', { username: name.toUpperCase(), password: 'other123' })).status, 400); // taken, any case
+
+  // Log in: wrong password fails, right one works.
+  assert.equal((await post('/api/login', { username: name, password: 'nope-nope' })).status, 400);
+  const login = await post('/api/login', { username: name.toUpperCase(), password: 'secret123' });
+  assert.equal(login.status, 200);
+  const me = await (await fetch(`${URL}/api/me`, { headers: { cookie } })).json();
+  assert.equal(me.user.username, name);
+
+  // Play two hands: the logged-in host and a guest.
+  const socket = io(URL, { transports: ['websocket'], forceNew: true, extraHeaders: { cookie } });
+  const a = { name: 'acct', socket, token: `tok-acct-${Math.random().toString(36).slice(2)}xxxxxxxx`, state: null, listeners: [] };
+  socket.on('state', (s) => {
+    a.state = s;
+    a.listeners = a.listeners.filter((l) => !l(s));
+  });
+  const g = client('Guest');
+  const created = await emit(a, 'create', { name: 'ignored', token: a.token });
+  assert.ok(created.ok, created.error);
+  const lobby = await waitFor(a, (s) => !!s.me);
+  assert.equal(lobby.seats[lobby.me.seat].name, name); // plays under the username
+  assert.deepEqual(lobby.room.verified, [lobby.me.id]);
+  assert.ok((await emit(g, 'join', { code: created.code, name: 'Guest', token: g.token })).ok);
+  await waitFor(a, (s) => s.room.spectators.some((x) => x.requested));
+  assert.ok((await emit(a, 'host', { cmd: 'approve', playerId: g.state.viewer.id })).ok);
+  assert.ok((await emit(a, 'host', { cmd: 'start' })).ok);
+
+  for (let hand = 1; hand <= 2; hand++) {
+    await waitFor(a, (s) => s.handNumber === hand && s.handInProgress, 10000);
+    // Whoever is first to act folds: one quick hand.
+    const first = [a, g].find((x) => x.state.me && x.state.me.legal && x.state.handNumber === hand)
+      || (await new Promise((r) => setTimeout(r, 100)), [a, g].find((x) => x.state.me && x.state.me.legal));
+    assert.ok((await emit(first, 'action', { type: 'fold' })).ok);
+    await waitFor(a, (s) => s.handNumber === hand && s.phase === 'handOver');
+  }
+  await new Promise((r) => setTimeout(r, 200)); // saving happens just after the hand
+
+  const stats = await (await fetch(`${URL}/api/stats`, { headers: { cookie } })).json();
+  assert.equal(stats.lifetime.hands, 2);
+  assert.equal(stats.lifetime.games, 1);
+  assert.equal(stats.lifetime.vpip, 0); // folded or checked the blind: never put money in by choice
+  assert.equal(stats.lifetime.won, 50); // heads-up, one fold each way
+  assert.equal(stats.games.length, 1);
+  assert.equal(stats.games[0].hands, 2);
+  // Folded the small blind once (−10), and won the other player's small blind once (+10).
+  assert.equal(stats.lifetime.net, 0);
+
+  // Anyone can look a player up, search for them, and see the leaderboard.
+  const pub = await (await fetch(`${URL}/api/players/${name.toUpperCase()}`)).json();
+  assert.equal(pub.user.username, name);
+  assert.equal(pub.lifetime.hands, 2);
+  assert.equal((await fetch(`${URL}/api/players/nobody-here`)).status, 404);
+  const found = await (await fetch(`${URL}/api/players?q=${name.slice(0, 7)}`)).json();
+  assert.ok(found.players.some((p) => p.username === name && p.hands === 2));
+  const board = await (await fetch(`${URL}/api/leaderboard?sort=hands`)).json();
+  assert.equal(board.sort, 'hands');
+  assert.ok(board.players.some((p) => p.username === name));
+  const pctBoard = await (await fetch(`${URL}/api/leaderboard?sort=won`)).json();
+  assert.equal(pctBoard.minHands, 20);
+  assert.ok(!pctBoard.players.some((p) => p.username === name)); // only 2 hands: not ranked by %
+
+  // Tapping a seat: tonight's stats plus the account name.
+  const card = await emit(g, 'playerInfo', { playerId: lobby.me.id });
+  assert.equal(card.info.username, name);
+  assert.equal(card.info.tonight.hands, 2);
+
+  // Guests can't see account stats; logging out ends the session.
+  assert.equal((await fetch(`${URL}/api/stats`)).status, 400);
+  assert.equal((await post('/api/logout', {}, cookie)).status, 200);
+  assert.equal((await (await fetch(`${URL}/api/me`, { headers: { cookie } })).json()).user, null);
+
+  socket.disconnect();
+  g.socket.disconnect();
 });

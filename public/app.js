@@ -220,6 +220,7 @@
   let dealt = new Map(); // card key -> first time seen (for deal animations)
   let dealtHand = -1;
   let controlsKey = '';
+  let requestsKey = '';
   let raiseOpen = false;
   let raiseValue = 0;
   let lastTurnKey = null;
@@ -249,7 +250,295 @@
     $('#inviteCode').textContent = urlCode;
   }
 
+  // --------------------------------------------------------------- account
+  let account = null; // { id, username } when logged in; guests are null
+
+  async function api(url, body) {
+    const res = await fetch(url, body === undefined
+      ? { credentials: 'same-origin' }
+      : { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    let data = {};
+    try { data = await res.json(); } catch { /* not JSON */ }
+    if (!res.ok || data.error) throw new Error(data.error || 'Something went wrong. Please try again.');
+    return data;
+  }
+
+  function renderAccount() {
+    const bar = $('#accountBar');
+    if (account) {
+      bar.innerHTML = `<button type="button" class="user-chip" data-act="myStats" title="My stats">
+          <span class="avatar" aria-hidden="true">${esc(account.username[0].toUpperCase())}</span><span class="uname">${esc(account.username)}</span>
+        </button>
+        <button type="button" class="nav-link" data-act="logout">Log out</button>`;
+    } else {
+      bar.innerHTML = `<button type="button" class="nav-link" data-act="openAuth" data-mode="login">Log in</button>
+        <button type="button" class="btn small primary" data-act="openAuth" data-mode="signup">Sign up</button>`;
+    }
+    $('#nameField').hidden = !!account; // logged-in players play under their username
+  }
+
+  async function loadAccount() {
+    try {
+      account = (await api('/api/me')).user || null;
+    } catch {
+      account = null;
+    }
+    renderAccount();
+  }
+  renderAccount();
+  loadAccount();
+
+  /** The server reads your login when the socket connects, so reconnect after logging in or out. */
+  let quietReconnect = false;
+  function reconnectSocket() {
+    quietReconnect = true;
+    socket.disconnect();
+    socket.connect();
+  }
+
+  let authMode = 'login';
+  function openAuth(mode = 'login') {
+    authMode = mode;
+    const signup = mode === 'signup';
+    $('#authTabLogin').setAttribute('aria-selected', String(!signup));
+    $('#authTabSignup').setAttribute('aria-selected', String(signup));
+    $('#authSubmit').textContent = signup ? 'Create account' : 'Log in';
+    $('#authPass').autocomplete = signup ? 'new-password' : 'current-password';
+    $('#authNote').textContent = signup
+      ? 'Pick a username (3–16 letters or numbers) and a password (6+ characters). Your hands, VPIP, PFR and win rates are saved from now on.'
+      : 'Log in to keep your stats across games. Guests can still play without an account.';
+    $('#authError').classList.add('hidden');
+    const dlgA = $('#authDlg');
+    if (!dlgA.open) dlgA.showModal();
+    $('#authUser').focus();
+  }
+
+  $('#authForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = $('#authSubmit');
+    btn.disabled = true;
+    try {
+      const { user } = await api(`/api/${authMode === 'signup' ? 'signup' : 'login'}`, {
+        username: $('#authUser').value,
+        password: $('#authPass').value,
+      });
+      account = user;
+      $('#authPass').value = '';
+      $('#authDlg').close();
+      renderAccount();
+      toast(authMode === 'signup' ? `Welcome to Poky, ${user.username}! 🎉` : `Welcome back, ${user.username}!`);
+      reconnectSocket();
+    } catch (err) {
+      const el = $('#authError');
+      el.textContent = err.message;
+      el.classList.remove('hidden');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  async function logout() {
+    try {
+      await api('/api/logout', {});
+    } catch { /* the cookie is cleared either way */ }
+    account = null;
+    renderAccount();
+    toast('Logged out. You can still play as a guest.');
+    reconnectSocket();
+  }
+
+  function openMyStats() {
+    return openProfile(null);
+  }
+
+  /** A player's profile: all-time tiles and recent games. `username` null = you. */
+  async function openProfile(username, { back = false } = {}) {
+    const dlgS = $('#statsDlg');
+    const backBtn = back ? '<button class="btn" data-act="profileBack">← Back</button>' : '';
+    const closeRow = `<div class="dlg-actions">${backBtn}<button class="btn primary" data-act="closeStats">Close</button></div>`;
+    $('#statsBody').innerHTML = `<div class="recap"><p class="recap-empty">Loading stats…</p>${closeRow}</div>`;
+    if (!dlgS.open) dlgS.showModal();
+    let data;
+    try {
+      data = await api(username ? `/api/players/${encodeURIComponent(username)}` : '/api/stats');
+    } catch (err) {
+      $('#statsBody').innerHTML = `<div class="recap"><p class="recap-empty">${esc(err.message)}</p>${closeRow}</div>`;
+      return;
+    }
+    const mine = !username || (account && account.username.toLowerCase() === username.toLowerCase());
+    const L = data.lifetime;
+    const tile = (label, value, sub = '') =>
+      `<div class="rs"><span class="rs-label">${label}</span><b class="rs-value">${value}</b><span class="rs-sub">${sub}</span></div>`;
+    const tiles = [
+      tile('Hands', fmt(L.hands), `${fmt(L.games)} game${L.games === 1 ? '' : 's'}`),
+      tile('VPIP', pctText(L.vpip), 'money in pre-flop'),
+      tile('PFR', pctText(L.pfr), 'raised pre-flop'),
+      tile('Won', pctText(L.won), 'of hands'),
+      tile('Showdown', pctText(L.showdown), `of ${fmt(L.showdowns || 0)} showdowns`),
+      tile('Net chips', `<span class="st-net ${L.net > 0 ? 'up' : L.net < 0 ? 'down' : ''}">${signed(L.net)}</span>`, `best pot +${fmt(L.biggestWin)}`),
+    ].join('');
+    const day = (iso) => new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+    const games = data.games.length
+      ? `<div class="recap-standings"><h3>Recent games</h3>${statsTable(
+          data.games.map((g) => ({
+            label: `${esc(g.tableName || `Table ${g.roomCode}`)}<small>${esc(day(g.lastHandAt))}</small>`,
+            ...g,
+          })),
+          { net: true }
+        )}</div>`
+      : `<p class="recap-empty">${mine ? 'No hands saved yet. Play a hand while logged in and it shows up here.' : 'No hands played yet.'}</p>`;
+    $('#statsBody').innerHTML = `<div class="recap">
+      <div class="recap-kicker">${mine ? 'My stats' : 'Player stats'}</div>
+      <h2 class="recap-title">${esc(data.user.username)}<span class="verified-badge" title="Has an account">✓</span></h2>
+      <div class="recap-stats">${tiles}</div>
+      ${games}
+      ${closeRow}
+    </div>`;
+  }
+
+  // -------------------------------------------- players: leaderboard + search
+  const SORTS = [
+    { key: 'net', label: 'Net chips' },
+    { key: 'hands', label: 'Hands' },
+    { key: 'won', label: 'Won %' },
+    { key: 'showdown', label: 'Showdown %' },
+    { key: 'vpip', label: 'VPIP' },
+    { key: 'pfr', label: 'PFR' },
+    { key: 'biggestWin', label: 'Biggest pot' },
+  ];
+  let boardSort = 'net';
+  let playersTab = 'board';
+  let reopenPlayers = false; // a profile opened from here goes "Back" to the list
+
+  function openPlayers(tab = playersTab) {
+    const d = $('#playersDlg');
+    if (!d.open) d.showModal();
+    switchPlayersTab(tab);
+  }
+
+  function switchPlayersTab(tab) {
+    playersTab = tab;
+    $('#ptBoard').setAttribute('aria-selected', String(tab === 'board'));
+    $('#ptSearch').setAttribute('aria-selected', String(tab === 'search'));
+    $('#boardPane').hidden = tab !== 'board';
+    $('#searchPane').hidden = tab !== 'search';
+    if (tab === 'board') loadBoard();
+    else {
+      $('#playerSearch').focus();
+      runSearch();
+    }
+  }
+
+  async function loadBoard() {
+    $('#boardSorts').innerHTML = SORTS.map(
+      (s) => `<button type="button" class="sort-chip" data-act="boardSort" data-sort="${s.key}" aria-pressed="${s.key === boardSort}">${s.label}</button>`
+    ).join('');
+    const body = $('#boardBody');
+    body.innerHTML = '<p class="recap-empty">Loading…</p>';
+    let data;
+    try {
+      data = await api(`/api/leaderboard?sort=${boardSort}`);
+    } catch (err) {
+      body.innerHTML = `<p class="recap-empty">${esc(err.message)}</p>`;
+      return;
+    }
+    if (data.sort !== boardSort) return; // a newer sort was picked meanwhile
+    const valueOf = (p) => {
+      switch (boardSort) {
+        case 'net': return `<span class="st-net ${p.net > 0 ? 'up' : p.net < 0 ? 'down' : ''}">${signed(p.net)}</span>`;
+        case 'hands': return fmt(p.hands);
+        case 'biggestWin': return `+${fmt(p.biggestWin)}`;
+        default: return pctText(p[boardSort]);
+      }
+    };
+    const rows = data.players
+      .map((p, i) => `<button type="button" class="lb-row${account && p.username === account.username ? ' me' : ''}" data-act="viewPlayer" data-name="${esc(p.username)}">
+          <span class="lb-rank">${i + 1}</span>
+          <span class="lb-name">${esc(p.username)}<small>${fmt(p.hands)} hands · VPIP ${pctText(p.vpip)} · PFR ${pctText(p.pfr)}</small></span>
+          <span class="lb-value">${valueOf(p)}</span>
+        </button>`)
+      .join('');
+    const note = data.minHands ? `<p class="note lb-note">Players with at least ${data.minHands} hands.</p>` : '';
+    body.innerHTML = rows ? `${note}<div class="lb-list">${rows}</div>` : `${note}<p class="recap-empty">Nobody on the board yet. Log in and play a few hands!</p>`;
+  }
+
+  let searchTimer = null;
+  let searchSeq = 0;
+  async function runSearch() {
+    const q = $('#playerSearch').value.trim();
+    const body = $('#searchBody');
+    if (!q) {
+      body.innerHTML = '<p class="recap-empty">Search by username to see anyone’s stats.</p>';
+      return;
+    }
+    const seq = ++searchSeq;
+    let data;
+    try {
+      data = await api(`/api/players?q=${encodeURIComponent(q)}`);
+    } catch (err) {
+      if (seq === searchSeq) body.innerHTML = `<p class="recap-empty">${esc(err.message)}</p>`;
+      return;
+    }
+    if (seq !== searchSeq) return; // an older search finished after a newer one
+    body.innerHTML = data.players.length
+      ? `<div class="lb-list">${data.players
+          .map((p) => `<button type="button" class="lb-row" data-act="viewPlayer" data-name="${esc(p.username)}">
+              <span class="lb-rank">👤</span><span class="lb-name">${esc(p.username)}<small>${fmt(p.hands)} hands played</small></span><span class="lb-value">›</span>
+            </button>`)
+          .join('')}</div>`
+      : `<p class="recap-empty">No player called “${esc(q)}”.</p>`;
+  }
+  $('#playerSearch').addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(runSearch, 200);
+  });
+
+  // ---------------------------------------------------- tap a seat: player card
+  function openSeatCard(playerId) {
+    const d = $('#seatDlg');
+    const body = $('#seatBody');
+    body.innerHTML = '<div class="seat-card"><p class="recap-empty">Loading…</p></div>';
+    if (!d.open) d.showModal();
+    socket.emit('playerInfo', { playerId }, async (res) => {
+      if (res?.error) {
+        body.innerHTML = `<div class="seat-card"><p class="recap-empty">${esc(res.error)}</p><div class="dlg-actions"><button class="btn primary" data-act="closeSeat">Close</button></div></div>`;
+        return;
+      }
+      const info = res.info;
+      const T = info.tonight;
+      const statRow = (label, s, extra = '') => `<div class="sc-row"><span class="sc-label">${label}</span>
+        <span class="sc-stats">
+          <span><b>${s ? fmt(s.hands) : '0'}</b>hands</span>
+          <span><b>${s ? pctText(s.vpip) : '–'}</b>VPIP</span>
+          <span><b>${s ? pctText(s.pfr) : '–'}</b>PFR</span>
+          <span><b>${s ? pctText(s.won) : '–'}</b>won</span>
+          <span><b>${s ? pctText(s.showdown) : '–'}</b>SD</span>
+        </span>${extra}</div>`;
+      const render = (lifetime, note = '') => {
+        const tonightNet = T ? `<span class="sc-net st-net ${T.net > 0 ? 'up' : T.net < 0 ? 'down' : ''}">${signed(T.net)} tonight</span>` : '';
+        body.innerHTML = `<div class="seat-card">
+          <div class="sc-head"><h3>${esc(info.name)}${info.username ? '<span class="verified-badge" title="Has an account">✓</span>' : ''}</h3>${tonightNet}</div>
+          ${statRow('Tonight', T)}
+          ${info.username ? (lifetime ? statRow('All time', lifetime) : `<p class="note">${note || 'Loading all-time stats…'}</p>`) : '<p class="note">Playing as a guest, so there are no all-time stats.</p>'}
+          <div class="dlg-actions">
+            ${info.username ? `<button class="btn" data-act="viewPlayer" data-name="${esc(info.username)}">Full profile</button>` : ''}
+            <button class="btn primary" data-act="closeSeat">Close</button>
+          </div>
+        </div>`;
+      };
+      render(null);
+      if (!info.username) return;
+      try {
+        const data = await api(`/api/players/${encodeURIComponent(info.username)}`);
+        if (d.open) render(data.lifetime);
+      } catch {
+        if (d.open) render(null, 'Couldn’t load all-time stats right now.');
+      }
+    });
+  }
+
   function getName() {
+    if (account) return account.username;
     const n = nameInput.value.trim();
     if (!n) {
       toast('Pick a nickname first');
@@ -271,8 +560,7 @@
     });
   });
 
-  $('#joinForm').addEventListener('submit', (e) => {
-    e.preventDefault();
+  function joinFromHome(watch) {
     const name = getName();
     if (!name) return;
     const code = codeInput.value.trim().toUpperCase();
@@ -281,8 +569,13 @@
       codeInput.focus();
       return;
     }
-    joinRoom(code);
+    joinRoom(code, watch);
+  }
+  $('#joinForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    joinFromHome(false);
   });
+  $('#watchBtn').addEventListener('click', () => joinFromHome(true));
 
   nameInput.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
@@ -291,10 +584,11 @@
     else $('#createBtn').click();
   });
 
-  function joinRoom(code) {
+  /** `watch` = come in as a spectator only; otherwise also ask for a seat (only matters the first time). */
+  function joinRoom(code, watch = false) {
     const name = nameInput.value.trim() || store.get('poky.name') || '';
     pendingJoin = true;
-    socket.emit('join', { code, name, token }, (res) => {
+    socket.emit('join', { code, name, token, watch }, (res) => {
       pendingJoin = false;
       if (res?.error) {
         if (!roomCode) state = null;
@@ -303,6 +597,7 @@
         return;
       }
       enterRoom(res.code);
+      if (res.notice) toast(res.notice, 4000);
     });
   }
 
@@ -336,6 +631,8 @@
     $('#bubbles').innerHTML = '';
     $('#callout').classList.add('hidden');
     $('#pragySay').classList.add('hidden');
+    $('#requests').classList.add('hidden');
+    requestsKey = '';
     suggestActive = null;
     recapSeen = null;
     if ($('#settingsDlg').open) $('#settingsDlg').close();
@@ -350,22 +647,41 @@
 
   // ---------------------------------------------------------------- socket
   socket.on('connect', () => {
+    quietReconnect = false;
     $('#connBanner').classList.add('hidden');
     if (roomCode) joinRoom(roomCode); // re-attach after a dropped connection
   });
   socket.on('disconnect', () => {
+    if (quietReconnect) return; // our own reconnect after logging in/out
     if (roomCode) $('#connBanner').classList.remove('hidden');
   });
   socket.on('kicked', () => {
     toast('The host removed you from the table.', 4000);
     leaveToHome(false);
   });
+  socket.on('denied', () => toast('The host said not yet. You can keep watching.', 4000));
+
+  /** Seat changes worth telling you about: you got a seat, or (as host) someone is asking for one. */
+  function noticeSeatChanges(prev, s) {
+    if (!prev || prev.room.code !== s.room.code || !prev.viewer || !s.viewer) return;
+    if (prev.viewer.spectator && !s.viewer.spectator) {
+      toast(s.handInProgress ? 'You’re in! You’ll be dealt in next hand.' : 'You’re in! Grab a seat 🪑', 3500);
+    }
+    if (s.room.hostId === s.viewer.id) {
+      const before = new Set(prev.room.spectators.filter((x) => x.requested).map((x) => x.id));
+      if (s.room.spectators.some((x) => x.requested && !before.has(x.id))) {
+        sound.ping();
+        if (navigator.vibrate) navigator.vibrate([80, 60, 80]);
+      }
+    }
+  }
   socket.on('state', (s) => {
     // The first state can arrive just before the join is acknowledged.
     if (!roomCode && !pendingJoin) return;
     const prev = state;
     playEventSounds(prev, s);
     detectBigMoment(prev, s);
+    noticeSeatChanges(prev, s);
     const potEl = $('#center .pot');
     const potFrom = potEl ? potEl.getBoundingClientRect() : null;
     state = s;
@@ -412,7 +728,7 @@
     if (chatMsgs.length > 100) chatMsgs.shift();
     renderChat();
     showBubble(m);
-    const mine = state && state.me && m.pid === state.me.id;
+    const mine = m.pid === myId();
     if (!mine && !(panelOpen() && panelTab === 'chat')) {
       unread++;
       renderBadge();
@@ -421,8 +737,12 @@
 
   // ---------------------------------------------------------------- render
   const tableEl = $('#table');
-  const isHost = () => state && state.me && state.room.hostId === state.me.id;
+  // `viewer` is who you are in the room (player or spectator); `me` only exists while you have a seat.
+  const myId = () => (state && state.viewer ? state.viewer.id : null);
+  const isHost = () => !!state && state.room.hostId === myId();
+  const isSpectator = () => !!(state && state.viewer && state.viewer.spectator);
   const mySeatObj = () => (state && state.me ? state.seats[state.me.seat] : null);
+  const tableFull = () => !!state && !state.seats.includes(null);
 
   function render() {
     if (!state) return;
@@ -434,6 +754,7 @@
     renderTopbar();
     renderTable();
     renderControls();
+    renderRequests();
     if (panelOpen() && panelTab === 'log') renderLog();
     if ($('#settingsDlg').open) renderPlayerAdmin();
     notifyTurn();
@@ -456,7 +777,35 @@
     else if (s.room.paused) text = '⏸ Paused';
     else if (s.room.endAfterHand) text = `Last hand of the night · #${s.handNumber}`;
     else text = `Hand #${s.handNumber} · Blinds ${fmt(s.settings.smallBlind)}/${fmt(s.settings.bigBlind)}`;
+    const watching = s.room.spectators.length;
+    if (watching) text += ` · 👁 ${watching}`;
     $('#statusText').textContent = text;
+    $('#statusText').title = watching ? `Watching: ${s.room.spectators.map((x) => x.name).join(', ')}` : '';
+  }
+
+  /** Host only: a card for each person asking for a seat, with Let in / Not now. */
+  function renderRequests() {
+    const el = $('#requests');
+    const list = isHost() ? state.room.spectators.filter((x) => x.requested) : [];
+    const full = tableFull();
+    const key = JSON.stringify([list.map((x) => [x.id, x.name, x.connected]), full]);
+    if (key === requestsKey) return;
+    requestsKey = key;
+    el.classList.toggle('hidden', list.length === 0);
+    const shown = list.slice(0, 3);
+    el.innerHTML =
+      shown
+        .map(
+          (x) => `<div class="req">
+            <span class="req-text"><b>${esc(x.name)}</b> wants to play${x.connected ? '' : ' <span class="muted">(offline)</span>'}</span>
+            <span class="req-actions">
+              <button class="btn small" data-act="deny" data-id="${esc(x.id)}">Not now</button>
+              <button class="btn small primary" data-act="approve" data-id="${esc(x.id)}" ${full ? 'disabled title="The table is full"' : ''}>Let in</button>
+            </span>
+          </div>`
+        )
+        .join('') +
+      (list.length > shown.length ? `<div class="req-more">+${list.length - shown.length} more waiting · see Table settings & players</div>` : '');
   }
 
   /** Card HTML. `key` enables a one-time deal animation for that card. */
@@ -482,8 +831,10 @@
     const s = state;
     const portrait = tableEl.clientHeight > tableEl.clientWidth * 1.05;
     tableEl.classList.toggle('portrait', portrait);
-    const RX = portrait ? 38 : 44;
-    const RY = portrait ? 40 : 37;
+    // Very short tables (phones held sideways) use a compact seat layout.
+    tableEl.classList.toggle('short', !portrait && tableEl.clientHeight < 380);
+    const RX = portrait ? 40 : 45;
+    const RY = portrait ? 41 : 38;
 
     const mySeat = s.me ? s.me.seat : 0;
     const occupied = s.seats
@@ -504,9 +855,10 @@
       // Seats are spread evenly around the table, you at the bottom, clockwise = next to act.
       const th = (2 * Math.PI * k) / n;
       const x = 50 - RX * Math.sin(th);
-      const y = 50 + RY * Math.cos(th);
-      seatPos.set(p.id, { x, y });
       const isMe = s.me && p.id === s.me.id;
+      // Your seat sits a touch higher: it has bigger cards and the hand-name pill underneath.
+      const y = 50 + RY * Math.cos(th) - (isMe ? 2 : 0);
+      seatPos.set(p.id, { x, y });
       const turn = s.handInProgress && s.toAct === p.seat;
       const won = winnings[p.id];
 
@@ -548,15 +900,22 @@
 
       const star = p.id === s.room.hostId ? '<span class="host-star" title="Host">★</span>' : '';
       const offline = p.connected ? '' : '<span class="offline-dot" title="Offline"></span>';
+      const verified = (s.room.verified || []).includes(p.id) ? '<span class="verified" title="Playing with an account">✓</span>' : '';
+      // Your hand name sits under your cards. Its space is kept while you hold cards so the seat doesn't jump.
+      let myHand = '';
+      if (isMe && p.inHand && p.cards && s.handInProgress) {
+        const hn = s.me.handName;
+        myHand = `<div class="my-hand${hn ? '' : ' empty'}">${hn ? esc(hn) : '&nbsp;'}</div>`;
+      }
       html += `<div class="${cls.join(' ')}" style="left:${x}%;top:${y}%">
         ${isMe ? suggestHTML(s) : ''}
         <div class="hole">${hole}</div>
-        <div class="plate">
-          <div class="name">${star}${esc(p.name)}${offline}</div>
+        <div class="plate" data-act="seatInfo" data-id="${esc(p.id)}" title="See ${esc(p.name)}’s stats">
+          <div class="name">${star}${esc(p.name)}${verified}${offline}</div>
           <div class="stack">${fmt(p.stack)}</div>
           ${timer}
         </div>
-        ${tag}
+        ${isMe ? `<div class="me-foot">${myHand}${tag}</div>` : tag}
       </div>`;
 
       if (p.bet > 0) {
@@ -589,7 +948,7 @@
         ${tableName() ? `<div class="lobby-name">${esc(tableName())}</div>` : ''}
         <div class="lobby-title">Table code</div>
         <div class="lobby-code">${esc(s.room.code)}</div>
-        <div class="lobby-sub">${count} player${count === 1 ? '' : 's'} at the table · ${fmt(s.settings.startingStack)} chips · blinds ${fmt(s.settings.smallBlind)}/${fmt(s.settings.bigBlind)}</div>
+        <div class="lobby-sub">${count} player${count === 1 ? '' : 's'} at the table${s.room.spectators.length ? ` · ${s.room.spectators.length} watching` : ''} · ${fmt(s.settings.startingStack)} chips · blinds ${fmt(s.settings.smallBlind)}/${fmt(s.settings.bigBlind)}</div>
         <div class="lobby-actions">
           <button class="btn small" data-act="invite">Copy invite link</button>
           ${isHost() ? '<button class="btn small" data-act="settings">Settings</button>' : ''}
@@ -665,7 +1024,12 @@
     const s = state;
     const me = s.me;
     const p = mySeatObj();
-    if (!p) return '';
+    if (!p) {
+      const v = s.viewer;
+      if (!v || !v.spectator) return '';
+      if (v.requested) return 'Waiting for the host to let you in…';
+      return tableFull() ? 'You’re watching. The table is full right now.' : 'You’re watching.';
+    }
     if (!s.room.started) return isHost() ? 'You’re the host. Start when everyone has joined.' : 'Waiting for the host to start…';
     if (s.room.ended) return 'The night is over. Thanks for playing!';
     if (s.room.paused) return 'The game is paused.';
@@ -689,19 +1053,16 @@
     const L = me && me.legal;
     if (!L) raiseOpen = false;
     const status = controlStatus();
-    const key = JSON.stringify([L, me && me.handName, me && me.canShow, status, raiseOpen, p && [p.stack, p.sittingOut, p.inHand], s.settings.allowRebuys, s.room.started, s.room.ended, s.handInProgress, s.currentBet === 0, p && s.currentBet > p.bet]);
+    const key = JSON.stringify([s.viewer, tableFull(), s.settings.requireApproval, L, me && me.handName, me && me.canShow, status, raiseOpen, p && [p.stack, p.sittingOut, p.inHand], s.settings.allowRebuys, s.room.started, s.room.ended, s.handInProgress, s.currentBet === 0, p && s.currentBet > p.bet]);
     if (key === controlsKey) {
       updateTimerText();
       return;
     }
     controlsKey = key;
 
-    const handName = me && me.handName
-      ? `<span class="hand-name">${esc(me.handName)}</span>`
-      : L ? '<span class="hand-name">Your turn</span>' : '';
-    let html = `<div class="controls-inner"><div class="ctl-info">${handName || `<span class="status">${esc(status)}</span>`}${
-      L ? '<span class="ctl-timer" id="myTimer"></span>' : handName && status ? `<span class="status">${esc(status)}</span>` : ''
-    }</div>`;
+    // Your hand name now lives under your cards on the table; the bar just says whose turn it is.
+    const lead = L ? '<span class="hand-name">Your turn</span>' : `<span class="status">${esc(status)}</span>`;
+    let html = `<div class="controls-inner"><div class="ctl-info">${lead}${L ? '<span class="ctl-timer" id="myTimer"></span>' : ''}</div>`;
 
     if (L) {
       if (raiseOpen && L.raise) {
@@ -744,6 +1105,16 @@
       // Not your turn: the same row stays in place (greyed out), so the page never jumps.
       // Rebuy / sit back in / show cards take that same spot when they apply.
       const extra = [];
+      const v = s.viewer;
+      if (!p && v && v.spectator) {
+        // Watching: ask for a seat (or sit straight down if you've been let in before).
+        if (v.requested) extra.push('<button class="btn" data-act="cancelRequest">Cancel my request</button>');
+        else if (tableFull()) extra.push('<button class="btn" disabled>Table is full</button>');
+        else {
+          const direct = v.approved || !s.settings.requireApproval;
+          extra.push(`<button class="btn primary" data-act="requestSeat">${direct ? 'Take a seat' : 'Ask to play'}</button>`);
+        }
+      }
       if (p) {
         const inHandNow = s.handInProgress && p.inHand;
         if (me.canShow) extra.push('<button class="btn" data-act="show">Show my cards</button>');
@@ -950,6 +1321,25 @@
     return `${n > 0 ? '+' : n < 0 ? '−' : ''}${fmt(Math.abs(n))}`;
   }
 
+  const pctText = (v) => (v == null ? '–' : `${v}%`);
+  const STAT_HELP = {
+    vpip: 'VPIP: how often you put money in before the flop by choice (calls and raises; blinds don’t count)',
+    pfr: 'PFR: how often you raised before the flop',
+    won: 'Won: share of your hands that you won',
+    sd: 'Showdown: share of showdowns you won',
+  };
+
+  /** A small table: one row per item { label, hands, vpip, pfr, won, showdown, net? }. */
+  function statsTable(rows, { net = false } = {}) {
+    const head = `<tr><th></th><th>Hands</th><th title="${STAT_HELP.vpip}">VPIP</th><th title="${STAT_HELP.pfr}">PFR</th>` +
+      `<th title="${STAT_HELP.won}">Won</th><th title="${STAT_HELP.sd}"><span class="long">Showdown</span><span class="short">SD</span></th>${net ? '<th>Net</th>' : ''}</tr>`;
+    const body = rows
+      .map((r) => `<tr><td class="st-label">${r.label}</td><td>${fmt(r.hands)}</td><td>${pctText(r.vpip)}</td><td>${pctText(r.pfr)}</td>` +
+        `<td>${pctText(r.won)}</td><td>${pctText(r.showdown)}</td>${net ? `<td class="st-net ${r.net > 0 ? 'up' : r.net < 0 ? 'down' : ''}">${signed(r.net)}</td>` : ''}</tr>`)
+      .join('');
+    return `<div class="stat-table-wrap"><table class="stat-table"><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
+  }
+
   function openRecap(r, final) {
     if (!r || !state) return;
     const dlgR = $('#recapDlg');
@@ -974,9 +1364,16 @@
       const standings = r.standings
         .map((p, i) => `<div class="st-row"><span class="st-rank">${i + 1}</span><span class="st-name">${esc(p.name)}</span><span class="st-net ${p.net > 0 ? 'up' : p.net < 0 ? 'down' : ''}">${signed(p.net)}</span></div>`)
         .join('');
+      const statRows = r.standings.filter((p) => p.stats && p.stats.hands > 0);
+      const playerTable = statRows.length
+        ? `<div class="recap-standings"><h3>Player stats</h3>${statsTable(
+            statRows.map((p) => ({ label: esc(p.name), ...p.stats }))
+          )}</div>`
+        : '';
       body = `<div class="recap-stats">${stats.join('')}</div>
         ${titles ? `<div class="recap-titles">${titles}</div>` : ''}
-        ${standings ? `<div class="recap-standings"><h3>Standings</h3>${standings}</div>` : ''}`;
+        ${standings ? `<div class="recap-standings"><h3>Standings</h3>${standings}</div>` : ''}
+        ${playerTable}`;
     }
     const keepPlaying = final && isHost() ? '<button class="btn" data-act="continueNight">Keep playing</button>' : '';
     $('#recapBody').innerHTML = `<div class="recap">
@@ -1048,10 +1445,10 @@
     if (!panelOpen() || panelTab !== 'chat') return;
     const list = $('#chatList');
     const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
-    const myId = state && state.me && state.me.id;
+    const me = myId();
     list.innerHTML = chatMsgs.length
       ? chatMsgs
-          .map((m) => `<div class="cm${m.pid === myId ? ' mine' : ''}"><span class="cm-name">${esc(m.name)}</span><span class="cm-text">${esc(m.text)}</span></div>`)
+          .map((m) => `<div class="cm${m.pid === me ? ' mine' : ''}"><span class="cm-name">${m.spectator ? '<span title="Watching">👁</span> ' : ''}${esc(m.name)}</span><span class="cm-text">${esc(m.text)}</span></div>`)
           .join('')
       : '<div class="chat-empty">No messages yet. Say hi 👋</div>';
     if (atBottom || forceBottom) list.scrollTop = list.scrollHeight;
@@ -1236,11 +1633,19 @@
     const items = [];
     items.push('<button data-act="log">Hand log</button>');
     if (state.room.started) items.push('<button data-act="stats">📊 Tonight’s stats</button>');
+    items.push(account ? '<button data-act="myStats">📈 My stats (all games)</button>' : '<button data-act="openAuth" data-mode="login">🔐 Log in to save my stats</button>');
+    items.push('<button data-act="openPlayers">🏆 Leaderboard & players</button>');
     items.push(`<button data-act="settings">${isHost() ? 'Table settings & players' : 'Table info'}</button>`);
     items.push('<button data-act="invite">Copy invite link</button>');
     items.push(`<button data-act="toggleSound">${sound.muted ? '🔇 Sound: off' : '🔊 Sound: on'}</button>`);
     if (p && state.room.started) {
       items.push(p.sittingOut ? '<button data-act="sitin">Sit back in</button>' : '<button data-act="sitout">Sit out next hand</button>');
+    }
+    if (p) items.push('<button data-act="standUp">👁 Stand up and watch</button>');
+    else if (isSpectator()) {
+      const v = state.viewer;
+      if (v.requested) items.push('<button data-act="cancelRequest">Cancel my seat request</button>');
+      else if (!tableFull()) items.push(`<button data-act="requestSeat">${v.approved || !state.settings.requireApproval ? '🪑 Take a seat' : '🪑 Ask to play'}</button>`);
     }
     if (isHost() && state.room.started && !state.room.ended) {
       items.push(state.room.paused ? '<button data-act="resume">Resume game</button>' : '<button data-act="pause">Pause game</button>');
@@ -1311,6 +1716,7 @@
     form.bigBlind.value = cur.bigBlind;
     form.turnTime.value = cur.turnTime;
     form.allowRebuys.checked = cur.allowRebuys;
+    form.requireApproval.checked = s.settings.requireApproval !== false;
     form.theme.value = s.settings.theme || 'classic';
     form.tableName.value = s.settings.tableName || '';
     for (const el of form.querySelectorAll('input')) el.disabled = !hostMode;
@@ -1327,16 +1733,28 @@
 
   function renderPlayerAdmin() {
     const hostMode = isHost();
+    const kickBtn = (p) =>
+      hostMode && p.id !== myId() ? `<button type="button" class="btn small" data-act="kick" data-id="${esc(p.id)}" data-name="${esc(p.name)}">Remove</button>` : '';
+    const tagsFor = (p, more = []) =>
+      [p.id === state.room.hostId ? 'host' : '', p.id === myId() ? 'you' : '', p.connected ? '' : 'offline', ...more].filter(Boolean).join(', ');
     const rows = state.seats
       .filter(Boolean)
       .map((p) => {
-        const you = state.me && p.id === state.me.id;
-        const kick = hostMode && !you ? `<button type="button" class="btn small" data-act="kick" data-id="${esc(p.id)}" data-name="${esc(p.name)}">Remove</button>` : '';
-        const tags = [p.id === state.room.hostId ? 'host' : '', you ? 'you' : '', p.connected ? '' : 'offline'].filter(Boolean).join(', ');
-        return `<div class="player-row"><span>${esc(p.name)} <span class="muted">${tags ? `(${tags}) ` : ''}· ${fmt(p.stack)}</span></span>${kick}</div>`;
+        const tags = tagsFor(p);
+        return `<div class="player-row"><span>${esc(p.name)} <span class="muted">${tags ? `(${tags}) ` : ''}· ${fmt(p.stack)}</span></span>${kickBtn(p)}</div>`;
       })
       .join('');
-    $('#playerAdmin').innerHTML = `<h3>Players</h3>${rows}`;
+    const watchers = state.room.spectators
+      .map((p) => {
+        const tags = tagsFor(p, [p.requested ? 'wants to play' : '']);
+        const decide = hostMode && p.requested
+          ? `<button type="button" class="btn small" data-act="deny" data-id="${esc(p.id)}">Not now</button>` +
+            `<button type="button" class="btn small primary" data-act="approve" data-id="${esc(p.id)}" ${tableFull() ? 'disabled' : ''}>Let in</button>`
+          : '';
+        return `<div class="player-row"><span>👁 ${esc(p.name)}${tags ? ` <span class="muted">(${tags})</span>` : ''}</span><span class="row-actions">${decide}${kickBtn(p)}</span></div>`;
+      })
+      .join('');
+    $('#playerAdmin').innerHTML = `<h3>Players</h3>${rows}${watchers ? `<h3>Watching</h3>${watchers}` : ''}`;
   }
 
   // Live preview while the host picks a style; closing without saving reverts it.
@@ -1359,6 +1777,7 @@
       bigBlind: Number(form.bigBlind.value),
       turnTime: Number(form.turnTime.value),
       allowRebuys: form.allowRebuys.checked,
+      requireApproval: form.requireApproval.checked,
       theme: form.theme.value,
       tableName: form.tableName.value,
     };
@@ -1427,7 +1846,50 @@
         }
         break;
       case 'leave':
-        if (confirm('Leave the table? You’ll give up your seat and chips.')) leaveToHome(true);
+        if (confirm(isSpectator() ? 'Leave the table?' : 'Leave the table? You’ll give up your seat and chips.')) leaveToHome(true);
+        break;
+      case 'openAuth': closeMenu(); openAuth(el.dataset.mode); break;
+      case 'authMode': openAuth(el.dataset.mode); break;
+      case 'closeAuth': $('#authDlg').close(); break;
+      case 'logout': logout(); break;
+      case 'myStats': closeMenu(); reopenPlayers = false; openMyStats(); break;
+      case 'closeStats': $('#statsDlg').close(); reopenPlayers = false; break;
+      case 'openPlayers': closeMenu(); openPlayers(); break;
+      case 'closePlayers': $('#playersDlg').close(); break;
+      case 'playersTab': switchPlayersTab(el.dataset.tab); break;
+      case 'boardSort': boardSort = el.dataset.sort; loadBoard(); break;
+      case 'viewPlayer': {
+        // From the list: "Back" returns to it. From a seat card: just the profile.
+        reopenPlayers = $('#playersDlg').open;
+        if (reopenPlayers) $('#playersDlg').close();
+        if ($('#seatDlg').open) $('#seatDlg').close();
+        openProfile(el.dataset.name, { back: reopenPlayers });
+        break;
+      }
+      case 'profileBack':
+        $('#statsDlg').close();
+        reopenPlayers = false;
+        openPlayers();
+        break;
+      case 'seatInfo': openSeatCard(el.dataset.id); break;
+      case 'closeSeat': $('#seatDlg').close(); break;
+      case 'requestSeat':
+        socket.emit('requestSeat', {}, (res) => res?.error && toast(res.error, 3500));
+        break;
+      case 'cancelRequest':
+        socket.emit('cancelRequest', {}, (res) => res?.error && toast(res.error));
+        break;
+      case 'standUp': {
+        const inHand = state.handInProgress && mySeatObj()?.inHand && !mySeatObj()?.folded;
+        const msg = inHand ? 'Stand up and watch? You’ll fold this hand. Your chips are kept for when you sit back down.' : 'Stand up and watch? Your chips are kept for when you sit back down.';
+        if (confirm(msg)) socket.emit('standUp', {}, (res) => res?.error && toast(res.error));
+        break;
+      }
+      case 'approve':
+        host('approve', { playerId: el.dataset.id });
+        break;
+      case 'deny':
+        host('deny', { playerId: el.dataset.id });
         break;
       case 'kick':
         if (confirm(`Remove ${el.dataset.name} from the table?`)) host('kick', { playerId: el.dataset.id });

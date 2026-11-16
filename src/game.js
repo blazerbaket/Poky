@@ -21,10 +21,11 @@ const DEFAULT_SETTINGS = Object.freeze({
   allowRebuys: true,
   theme: 'classic',
   tableName: '', // e.g. "Friday Night at Aryan's"; shown on the felt and in invite previews
+  requireApproval: true, // newcomers watch until the host lets them sit down
 });
 const TABLE_NAME_MAX = 32;
-// Settings that only change how the table looks, so they apply right away, even mid-hand.
-const COSMETIC = ['theme', 'tableName'];
+// Settings that don't touch the chips or blinds, so they apply right away, even mid-hand.
+const COSMETIC = ['theme', 'tableName', 'requireApproval'];
 
 /** Errors caused by a player's request (safe to show to the player). */
 class GameError extends Error {}
@@ -56,11 +57,30 @@ function validateSettings(s) {
     allowRebuys: Boolean(s.allowRebuys),
     theme: THEMES.includes(s.theme) ? s.theme : 'classic',
     tableName: cleanText(s.tableName, TABLE_NAME_MAX),
+    requireApproval: s.requireApproval === undefined ? true : Boolean(s.requireApproval),
   };
   if (out.bigBlind < out.smallBlind) throw new GameError('The big blind must be at least the small blind.');
   if (out.bigBlind > out.startingStack) throw new GameError('The big blind can’t be more than the starting chips.');
   if (out.turnTime !== 0 && out.turnTime < 10) throw new GameError('The turn timer must be 0 (off) or at least 10 seconds.');
   return out;
+}
+
+/**
+ * The headline stats from raw counts { hands, wins, vpip, pfr, showdowns, showdownWins }.
+ * Percentages are whole numbers, or null when there's nothing to divide by yet.
+ * Used for tonight's stats and lifetime stats alike.
+ *   vpip / pfr / won: % of hands · showdown: % of showdowns won
+ */
+function playerStats(c) {
+  const pct = (n, d) => (d > 0 ? Math.round((100 * n) / d) : null);
+  return {
+    hands: c.hands,
+    vpip: pct(c.vpip, c.hands),
+    pfr: pct(c.pfr, c.hands),
+    won: pct(c.wins, c.hands),
+    showdown: pct(c.showdownWins, c.showdowns),
+    showdowns: c.showdowns,
+  };
 }
 
 function resetHandFields(p) {
@@ -74,6 +94,8 @@ function resetHandFields(p) {
   p.actedAtRaise = -1; // value of fullRaiseCount when the player last acted
   p.lastAction = null;
   p.shown = false;
+  p.vpip = false; // put money in voluntarily before the flop (blinds don't count)
+  p.pfr = false; // bet or raised before the flop
 }
 
 class Game {
@@ -103,12 +125,16 @@ class Game {
     // For the end-of-night recap. Kept after a player leaves so their night still counts.
     this.stats = new Map(); // player id -> stats
     this.records = { biggestPot: null, bestHand: null };
+    this.handSummary = null; // set at the end of every hand
   }
 
   statsFor(p) {
     let st = this.stats.get(p.id);
     if (!st) {
-      st = { name: p.name, bought: 0, finalStack: null, handsPlayed: 0, handsWon: 0, folds: 0, allIns: 0, rebuys: 0 };
+      st = {
+        name: p.name, bought: 0, finalStack: null, handsPlayed: 0, handsWon: 0, folds: 0, allIns: 0, rebuys: 0,
+        handsDone: 0, vpip: 0, pfr: 0, showdowns: 0, showdownWins: 0,
+      };
       this.stats.set(p.id, st);
     }
     return st;
@@ -125,19 +151,30 @@ class Game {
 
   // ---------------------------------------------------------------- players
 
-  addPlayer(name, id = crypto.randomBytes(8).toString('hex')) {
+  /**
+   * Seat a player. `stack` is for someone sitting back down after watching for a while:
+   * they get the chips they stood up with instead of a fresh buy-in.
+   */
+  addPlayer(name, id = crypto.randomBytes(8).toString('hex'), stack = null) {
     const seat = this.seats.indexOf(null);
     if (seat === -1) throw new GameError('Sorry, the table is full (9 players max).');
-    const p = { id, name, seat, stack: this.settings.startingStack, sittingOut: false, connected: true, rebuys: 0 };
+    const returning = Number.isInteger(stack) && stack >= 0;
+    const p = { id, name, seat, stack: returning ? stack : this.settings.startingStack, sittingOut: false, connected: true, rebuys: 0 };
     resetHandFields(p);
     this.seats[seat] = p;
     this.players.set(id, p);
-    this.statsFor(p).bought = p.stack;
-    this.addLog(`${name} joined the table.`);
+    const st = this.statsFor(p);
+    if (this.handNumber === 0) {
+      // Nothing has been played yet: everyone simply has the starting stack.
+      p.stack = this.settings.startingStack;
+      st.bought = p.stack;
+    } else if (!returning) st.bought += p.stack;
+    st.finalStack = null;
+    this.addLog(returning ? `${name} sat back down.` : `${name} joined the table.`);
     return p;
   }
 
-  removePlayer(id) {
+  removePlayer(id, logText = null) {
     const p = this.players.get(id);
     if (!p) return;
     if (this.handInProgress && p.inHand && !p.folded) {
@@ -156,7 +193,7 @@ class Game {
     this.statsFor(p).finalStack = p.stack;
     this.seats[p.seat] = null;
     this.players.delete(id);
-    this.addLog(`${p.name} left the table.`);
+    this.addLog(logText || `${p.name} left the table.`);
   }
 
   setSittingOut(id, value) {
@@ -393,6 +430,10 @@ class Game {
         throw new GameError('Unknown action.');
     }
 
+    if (this.phase === 'preflop') {
+      if (type === 'call' || type === 'raise') p.vpip = true;
+      if (type === 'raise') p.pfr = true;
+    }
     p.hasActed = true;
     p.actedAtRaise = this.fullRaiseCount;
     if (p.folded) this.statsFor(p).folds++;
@@ -584,6 +625,23 @@ class Game {
       const st = this.stats.get(id);
       if (st && winnings[id] > 0) st.handsWon++;
     }
+    // Per-player summary of this hand (for tonight's stats and for saving to accounts).
+    const atShowdown = new Set(result.showdown.map((sd) => sd.id));
+    this.handSummary = {
+      handNumber: this.handNumber,
+      pot: total,
+      players: this.handPlayers.map((p) => {
+        const won = (winnings[p.id] || 0) > 0;
+        const showdown = atShowdown.has(p.id);
+        const st = this.statsFor(p);
+        st.handsDone++; // finished hands, so the percentages never count a hand that's still going
+        if (p.vpip) st.vpip++;
+        if (p.pfr) st.pfr++;
+        if (showdown) st.showdowns++;
+        if (showdown && won) st.showdownWins++;
+        return { id: p.id, vpip: p.vpip, pfr: p.pfr, won, showdown, net: (winnings[p.id] || 0) - p.totalBet, winnings: winnings[p.id] || 0 };
+      }),
+    };
     if (!this.records.biggestPot || total > this.records.biggestPot.amount) {
       this.records.biggestPot = {
         amount: total,
@@ -620,7 +678,10 @@ class Game {
       const p = this.players.get(id);
       // Mid-hand, count chips already bet this hand as still theirs (the recap is normally built between hands).
       const stack = p ? p.stack + (this.handInProgress && p.inHand ? p.totalBet : 0) : st.finalStack ?? 0;
-      return { name: st.name, net: stack - st.bought, handsPlayed: st.handsPlayed, handsWon: st.handsWon, folds: st.folds, allIns: st.allIns, rebuys: st.rebuys, here: !!p };
+      return {
+        name: st.name, net: stack - st.bought, handsPlayed: st.handsPlayed, handsWon: st.handsWon, folds: st.folds, allIns: st.allIns, rebuys: st.rebuys, here: !!p,
+        stats: playerStats({ hands: st.handsDone, wins: st.handsWon, vpip: st.vpip, pfr: st.pfr, showdowns: st.showdowns, showdownWins: st.showdownWins }),
+      };
     });
     const played = rows.filter((r) => r.handsPlayed > 0);
     const top = (key, pred) => {
@@ -652,7 +713,7 @@ class Game {
       bestHand: bestHand && { name: bestHand.name, player: bestHand.player, hand: bestHand.hand },
       mostWins: wins && { name: wins.name, count: wins.handsWon },
       titles,
-      standings: played.sort((a, b) => b.net - a.net).map((r) => ({ name: r.name, net: r.net, handsWon: r.handsWon, here: r.here })),
+      standings: played.sort((a, b) => b.net - a.net).map((r) => ({ name: r.name, net: r.net, handsWon: r.handsWon, here: r.here, stats: r.stats })),
     };
   }
 
@@ -668,7 +729,8 @@ class Game {
     if (me) {
       let handName = null;
       if (me.inHand && me.cards.length === 2) {
-        handName = this.board.length >= 3 ? bestHand([...me.cards, ...this.board]).name : describePocket(me.cards);
+        // Just the hand type ("Two Pair"), not the details; before the flop only a pocket pair counts.
+        handName = this.board.length >= 3 ? bestHand([...me.cards, ...this.board]).short : describePocket(me.cards) && 'Pair';
       }
       myView = {
         id: me.id,
@@ -722,4 +784,4 @@ class Game {
   }
 }
 
-module.exports = { Game, GameError, MAX_SEATS, DEFAULT_SETTINGS, THEMES, validateSettings, cleanText };
+module.exports = { Game, GameError, MAX_SEATS, DEFAULT_SETTINGS, THEMES, validateSettings, cleanText, playerStats };
