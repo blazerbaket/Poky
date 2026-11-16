@@ -20,6 +20,19 @@ test('names hands correctly', () => {
   assert.equal(h('Ac Jd 8h 4s 2c').name, 'Ace High');
 });
 
+test('short names are just the hand type', () => {
+  assert.equal(h('As Ks Qs Js Ts').short, 'Royal Flush');
+  assert.equal(h('9h 8h 7h 6h 5h').short, 'Straight Flush');
+  assert.equal(h('7c 7d 7h 7s 2c').short, 'Four of a Kind');
+  assert.equal(h('Kc Kd Kh 5s 5c').short, 'Full House');
+  assert.equal(h('Ad 9d 7d 4d 2d').short, 'Flush');
+  assert.equal(h('Ac 2d 3h 4s 5c').short, 'Straight');
+  assert.equal(h('6c 6d 6h Ks 2c').short, 'Three of a Kind');
+  assert.equal(h('Jc Jd 4h 4s Ac').short, 'Two Pair');
+  assert.equal(h('Tc Td 4h 3s Ac').short, 'Pair');
+  assert.equal(h('Ac Jd 8h 4s 2c').short, 'High Card');
+});
+
 test('category order', () => {
   const order = [
     'As Ks Qs Js Ts', '7c 7d 7h 7s 2c', 'Kc Kd Kh 5s 5c', 'Ad 9d 7d 4d 2d', '9c 8d 7h 6s 5c',

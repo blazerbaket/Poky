@@ -70,6 +70,14 @@ function describe(score) {
   }
 }
 
+const SHORT_NAMES = ['High Card', 'Pair', 'Two Pair', 'Three of a Kind', 'Straight', 'Flush', 'Full House', 'Four of a Kind', 'Straight Flush'];
+
+/** Just the hand type ("Two Pair", "Flush"), for the live label under your cards. */
+function shortName(score) {
+  if (score[0] === 8 && score[1] === 14) return 'Royal Flush';
+  return SHORT_NAMES[score[0]];
+}
+
 /** Best five-card hand from 5–7 cards. Returns { score, cards, name }. */
 function bestHand(cards) {
   if (cards.length < 5 || cards.length > 7) throw new Error('bestHand needs 5 to 7 cards');
@@ -88,7 +96,7 @@ function bestHand(cards) {
               bestCards = five;
             }
           }
-  return { score: best, cards: bestCards, name: describe(best) };
+  return { score: best, cards: bestCards, name: describe(best), short: shortName(best) };
 }
 
 /** Short description for two hole cards before the flop (pairs only). */
@@ -97,4 +105,4 @@ function describePocket(cards) {
   return null;
 }
 
-module.exports = { evaluate5, bestHand, compareScores, describe, describePocket };
+module.exports = { evaluate5, bestHand, compareScores, describe, describePocket, shortName };

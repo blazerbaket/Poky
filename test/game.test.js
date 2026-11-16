@@ -332,3 +332,54 @@ test('random simulation: chips are always conserved and hands always finish', ()
     }
   }
 });
+
+test('stats: VPIP, PFR, wins and showdowns are counted per hand', () => {
+  const { g, ps } = setup([1000, 1000, 1000]);
+  // Hand 1: P0 (button, first to act) raises, P1 (small blind) calls, P2 (big blind) folds.
+  g.startHand();
+  g.act(ps[0].id, 'raise', 60);
+  g.act(ps[1].id, 'call');
+  g.act(ps[2].id, 'fold');
+  assert.equal(g.phase, 'flop');
+  g.act(ps[1].id, 'check');
+  g.act(ps[0].id, 'raise', 100);
+  g.act(ps[1].id, 'fold');
+  const h1 = Object.fromEntries(g.handSummary.players.map((p) => [p.id, p]));
+  assert.deepEqual([h1[ps[0].id].vpip, h1[ps[0].id].pfr, h1[ps[0].id].won, h1[ps[0].id].showdown], [true, true, true, false]);
+  assert.deepEqual([h1[ps[1].id].vpip, h1[ps[1].id].pfr, h1[ps[1].id].won], [true, false, false]);
+  assert.deepEqual([h1[ps[2].id].vpip, h1[ps[2].id].pfr], [false, false]); // posting the blind isn't voluntary
+  assert.equal(h1[ps[0].id].net, 80); // won 140, put in 60 (the uncalled 100 came back)
+  assert.equal(h1[ps[1].id].net, -60);
+  assert.equal(h1[ps[2].id].net, -20);
+
+  // Hand 2: everyone limps / checks to a showdown. Checking the big blind is not VPIP.
+  g.startHand();
+  const bb = g.seats[g.bbSeat];
+  for (let i = 0; i < 20 && g.handInProgress; i++) {
+    const p = g.seats[g.toAct];
+    g.act(p.id, g.legalActions(p).canCheck ? 'check' : 'call');
+  }
+  const h2 = g.handSummary.players;
+  assert.ok(h2.every((p) => p.showdown));
+  assert.equal(h2.find((p) => p.id === bb.id).vpip, false);
+  assert.equal(h2.filter((p) => p.vpip).length, 2);
+
+  const rows = Object.fromEntries(g.buildRecap().standings.map((r) => [r.name, r.stats]));
+  assert.equal(rows.P0.hands, 2);
+  assert.equal(rows.P0.pfr, 50);
+  assert.equal(rows.P2.vpip, bb.id === ps[2].id ? 0 : 50);
+  for (const r of Object.values(rows)) assert.equal(r.showdowns, 1);
+});
+
+test('sitting back down keeps your chips and does not count as a new buy-in', () => {
+  const { g, ps } = setup([1000, 1000]);
+  g.startHand();
+  g.act(ps[0].id, 'fold'); // P0 loses the small blind
+  const id = ps[0].id;
+  const stack = ps[0].stack;
+  g.removePlayer(id, 'P0 stood up to watch.');
+  const back = g.addPlayer('P0', id, stack);
+  assert.equal(back.stack, 990);
+  const p0 = g.buildRecap().standings.find((r) => r.name === 'P0');
+  assert.equal(p0.net, -10);
+});

@@ -1,4 +1,6 @@
 node_modules/
+# Secrets (database connection string) - never commit
+.env
 npm-debug.log*
 .DS_Store
 

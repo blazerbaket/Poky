@@ -4,43 +4,70 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0a1310">
-  <meta name="description" content="Texas Hold'em with your friends. No sign-up, just pick a nickname.">
+  <meta name="description" content="Texas Hold'em with your friends. Play as a guest or log in to keep your stats.">
   <title>Poky · Hold'em with friends</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%23177a42'/%3E%3Ctext x='50' y='70' font-size='60' text-anchor='middle' fill='white'%3E%E2%99%A0%3C/text%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;0,700;0,800;1,600&display=swap">
+  <!-- Outfit for headings and numbers, Inter for everything else -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Outfit:wght@500;600;700;800&display=swap">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
   <!-- Home: nickname + create / join -->
   <section id="home" class="screen home">
-    <div class="home-card">
-      <div class="logo" aria-label="Poky">
-        <span class="logo-suit">♠</span><span class="logo-suit red">♥</span>
-        <span class="logo-word">Poky</span>
-        <span class="logo-suit">♣</span><span class="logo-suit red">♦</span>
+    <header class="home-nav">
+      <div class="brand" aria-label="Poky">
+        <span class="brand-mark" aria-hidden="true">♠</span><span class="brand-word">Poky</span>
       </div>
-      <p class="tagline">Texas Hold'em with your friends.<br>No sign-up. Just pick a nickname.</p>
+      <nav class="home-links">
+        <button class="nav-link" type="button" data-act="openPlayers"><span aria-hidden="true">🏆</span><span class="nav-label">Leaderboard</span></button>
+        <!-- Account: filled in by app.js -->
+        <div id="accountBar" class="account-bar"></div>
+      </nav>
+    </header>
 
-      <p class="invite-note" id="inviteNote" hidden>You've been invited to table <b id="inviteCode"></b></p>
+    <main class="home-main">
+      <div class="hero">
+        <span class="kicker">Texas Hold'em · with friends</span>
+        <h1 class="hero-title">Your home game,<br><span class="accent">online.</span></h1>
+        <p class="hero-sub">Start a table in seconds, send the link, deal. Play chips only, nothing to install.</p>
+      </div>
 
-      <label class="field">
-        <span>Your nickname</span>
-        <input id="nameInput" maxlength="16" autocomplete="nickname" placeholder="e.g. Aryan" enterkeyhint="go">
-      </label>
+      <div class="play-card">
+        <div class="play-head">
+          <h2>Play now</h2>
+          <div class="hero-cards" aria-hidden="true">
+            <div class="card"><span class="cr">A</span><span class="cs">♠</span><span class="cb">♠</span></div>
+            <div class="card red"><span class="cr">K</span><span class="cs">♥</span><span class="cb">♥</span></div>
+          </div>
+        </div>
+        <p class="invite-note" id="inviteNote" hidden>You've been invited to table <b id="inviteCode"></b></p>
 
-      <button id="createBtn" class="btn primary big" type="button">Create a new table</button>
+        <label class="field" id="nameField">
+          <span>Your nickname</span>
+          <input id="nameInput" maxlength="16" autocomplete="nickname" placeholder="e.g. Aryan" enterkeyhint="go">
+        </label>
 
-      <div class="divider"><span>or join a friend's table</span></div>
+        <button id="createBtn" class="btn primary big" type="button">Create a new table</button>
 
-      <form id="joinForm" class="join-row" autocomplete="off">
-        <input id="codeInput" maxlength="6" placeholder="CODE" autocapitalize="characters" spellcheck="false" aria-label="Table code">
-        <button class="btn" type="submit" id="joinBtn">Join</button>
-      </form>
-      <p class="fine">Play chips only. No real money.</p>
-    </div>
+        <div class="divider"><span>or join a friend's table</span></div>
+
+        <form id="joinForm" class="join-row" autocomplete="off">
+          <input id="codeInput" maxlength="6" placeholder="CODE" autocapitalize="characters" spellcheck="false" aria-label="Table code">
+          <button class="btn" type="submit" id="joinBtn">Join</button>
+        </form>
+        <button id="watchBtn" class="link-btn" type="button">👁 Just watch for now</button>
+      </div>
+
+      <ul class="hero-points">
+        <li><span class="pt-ico" aria-hidden="true">🪑</span><span><b>You run the table</b>Friends ask for a seat and you let them in. Anyone else can watch.</span></li>
+        <li><span class="pt-ico" aria-hidden="true">📊</span><span><b>Real stats</b>VPIP, PFR, win rate and showdowns, saved to your account.</span></li>
+        <li><span class="pt-ico" aria-hidden="true">🔒</span><span><b>Fair deals</b>A fresh cryptographic shuffle on the server, every hand.</span></li>
+      </ul>
+    </main>
+    <p class="fine home-fine">Play chips only. No real money.</p>
   </section>
 
   <!-- Game -->
@@ -60,6 +87,8 @@
     <div id="connBanner" class="conn-banner hidden">Connection lost. Reconnecting…</div>
 
     <main class="table-area">
+      <!-- Host only: people asking for a seat -->
+      <div id="requests" class="requests hidden" aria-live="polite"></div>
       <div class="table" id="table">
         <div class="rail"><div class="felt"></div></div>
         <div id="seats"></div>
@@ -103,6 +132,55 @@
     </div>
   </aside>
 
+  <!-- Log in / sign up -->
+  <dialog id="authDlg" class="auth-dlg">
+    <form id="authForm" autocomplete="on">
+      <div class="tabs auth-tabs" role="tablist">
+        <button type="button" role="tab" data-act="authMode" data-mode="login" id="authTabLogin">Log in</button>
+        <button type="button" role="tab" data-act="authMode" data-mode="signup" id="authTabSignup">Sign up</button>
+      </div>
+      <p class="note" id="authNote"></p>
+      <label class="field"><span>Username</span>
+        <input name="username" id="authUser" maxlength="16" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      </label>
+      <label class="field"><span>Password</span>
+        <input name="password" id="authPass" type="password" maxlength="200" autocomplete="current-password" required>
+      </label>
+      <p class="auth-error hidden" id="authError" role="alert"></p>
+      <div class="dlg-actions">
+        <button class="btn" type="button" data-act="closeAuth">Cancel</button>
+        <button class="btn primary" type="submit" id="authSubmit">Log in</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- A player's profile (your own "My stats", or anyone's) -->
+  <dialog id="statsDlg" class="stats-dlg"><div id="statsBody"></div></dialog>
+
+  <!-- Players: leaderboard + search -->
+  <dialog id="playersDlg" class="players-dlg">
+    <div class="players">
+      <div class="players-head">
+        <div class="tabs" role="tablist">
+          <button type="button" role="tab" data-act="playersTab" data-tab="board" id="ptBoard">🏆 Leaderboard</button>
+          <button type="button" role="tab" data-act="playersTab" data-tab="search" id="ptSearch">🔍 Search</button>
+        </div>
+        <button class="icon-btn" type="button" data-act="closePlayers" aria-label="Close">✕</button>
+      </div>
+      <div id="boardPane">
+        <div class="sort-row" id="boardSorts" role="group" aria-label="Rank by"></div>
+        <div id="boardBody" class="players-body"></div>
+      </div>
+      <div id="searchPane" hidden>
+        <input id="playerSearch" type="search" maxlength="16" placeholder="Type a username…" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Search players">
+        <div id="searchBody" class="players-body"></div>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Tap a seat: that player's stats -->
+  <dialog id="seatDlg" class="seat-dlg"><div id="seatBody"></div></dialog>
+
   <!-- End-of-night recap -->
   <dialog id="recapDlg" class="recap-dlg"><div id="recapBody"></div></dialog>
 
@@ -126,6 +204,7 @@
         <label class="field"><span>Big blind</span><input name="bigBlind" type="number" min="1" step="1" inputmode="numeric" required></label>
       </div>
       <label class="check"><input type="checkbox" name="allowRebuys"> Allow rebuys when a player runs out of chips</label>
+      <label class="check"><input type="checkbox" name="requireApproval"> New people need my OK before they can sit down</label>
       <div id="playerAdmin" class="player-admin"></div>
       <div class="dlg-actions">
         <button class="btn" value="cancel" formnovalidate>Close</button>
